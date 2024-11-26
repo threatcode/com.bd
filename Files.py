@@ -72,7 +72,7 @@ async def get_random_words_from_api():
     """
     Fetch random words from an API.
     """
-    api_url = "https://random-word-api.herokuapp.com/word"
+    api_url = "https://random-word-api.vercel.app/api?words"
     async with ClientSession() as session:
         for _ in range(RANDOM_WORDS_COUNT):
             try:
