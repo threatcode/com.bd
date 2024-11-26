@@ -1,137 +1,72 @@
-import os
-import csv
-import asyncio
-import re
-import string
-import logging
-from user_agent import generate_user_agent
+import aiohttp
 from aiohttp import ClientSession
 from bs4 import BeautifulSoup
+import asyncio
+import re
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("BDKeywordScraper")
 
 # Constants
-WORDS = []
-IGNORE_WORDS = []
-IGNORE_LINKS = []
-PROCESSED = []
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
+BASE_URL = "https://www.google.com/search?q={keyword}+filetype:txt&start={page}"
+HEADERS = {"User-Agent": USER_AGENT}
+IGNORE_LINKS = []  # To avoid duplicates
 
-FORMATS = ["txt"]
-MAX_WORDS = 50
-SAVE_INTERVAL = 10  # Save interval for WordList.txt
 
-KEYS = {
-    "WordList.txt": WORDS,
-    "IgnoreWords.txt": IGNORE_WORDS,
-}
-
-# Logging setup
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("INDEXER")
-
-# Load initial word lists
-for key, storage in KEYS.items():
-    if os.path.exists(key):
-        with open(key, "r") as f:
-            storage.extend(f.read().splitlines())
-
-def save_wordlist():
+def is_valid_bd_domain(url: str) -> bool:
     """
-    Save the WORDS list to WordList.txt.
+    Check if the URL is a valid `.com.bd` domain and exclude Google redirects or irrelevant links.
     """
-    with open("WordList.txt", "w") as f:
-        f.write("\n".join(sorted(set(WORDS))))
+    return re.search(r"https?://(www\.)?[^/]+\.com\.bd", url, re.IGNORECASE) is not None
 
 
-def generate_com_bd_keywords(base_keywords):
+async def fetch_urls(session: ClientSession, keyword: str, start_page: int):
     """
-    Generate .com.bd-related keywords from a base list.
+    Fetch search results from Google for the given keyword and page number.
     """
-    generated_keywords = []
-    for base in base_keywords:
-        generated_keywords.append(base + ".com.bd")
-        generated_keywords.append("www." + base + ".com.bd")
-    return generated_keywords
+    url = BASE_URL.format(keyword=keyword, page=start_page)
+    try:
+        async with session.get(url, headers=HEADERS) as response:
+            if response.status == 200:
+                soup = BeautifulSoup(await response.text(), "html.parser")
+                links = []
+                for link in soup.find_all("a", href=True):
+                    match = re.search(r"url\?q=(http[s]?://.+?)&", link["href"])
+                    if match:
+                        target_url = match.group(1)
+                        if is_valid_bd_domain(target_url) and target_url not in IGNORE_LINKS:
+                            links.append(target_url)
+                            IGNORE_LINKS.append(target_url)
+                            logger.info(f"Valid .com.bd URL: {target_url}")
+                        else:
+                            logger.debug(f"Ignored URL: {target_url}")
+                return links
+            else:
+                logger.warning(f"Failed to fetch {url} with status code {response.status}")
+    except Exception as e:
+        logger.error(f"Error fetching {url}: {e}")
+    return []
 
 
-def judge_content(text: str) -> bool:
+async def scrape_com_bd_keywords(keywords: list, pages_per_keyword: int = 2):
     """
-    Ensure the content matches `.com.bd` and is valid.
+    Scrape .com.bd URLs for a list of keywords.
     """
-    return ".com.bd" in text.lower()
-
-
-async def fetch_com_bd_words(base_keywords):
-    """
-    Generate new `.com.bd` words based on existing base keywords.
-    """
-    new_keywords = generate_com_bd_keywords(base_keywords)
-    for keyword in new_keywords:
-        if keyword not in WORDS and keyword not in IGNORE_WORDS:
-            WORDS.append(keyword)
-            logger.info(f"Generated keyword: {keyword}")
-
-
-async def fetch_files(word: str):
-    """
-    Fetch .com.bd-related files.
-    """
-    if len(PROCESSED) >= MAX_WORDS:
-        raise Exception("Maximum word limit reached.")
-    if word in IGNORE_WORDS:
-        return
-    logger.info(f"--> Fetching for word: {word}")
-    IGNORE_WORDS.append(word)
-
-    folder = word[0].upper()
-    os.makedirs(folder, exist_ok=True)
-
-    async with ClientSession() as session:
-
-        async def fetch_by_format(filetype):
-            """
-            Fetch results for a specific file type.
-            """
-            search_url = f"https://google.com/search?q={word}+filetype:{filetype}"
-            try:
-                async with session.get(
-                    search_url,
-                    headers={"User-Agent": generate_user_agent()},
-                ) as response:
-                    soup = BeautifulSoup(await response.text(), "html.parser")
-                    for link in soup.find_all("a", href=True):
-                        url = link["href"]
-                        if judge_content(url):
-                            if url not in IGNORE_LINKS:
-                                IGNORE_LINKS.append(url)
-                                logger.info(f"Found URL: {url}")
-            except Exception as e:
-                logger.error(f"Error fetching {word}: {e}")
-
-        tasks = [fetch_by_format(ft) for ft in FORMATS]
-        await asyncio.gather(*tasks)
-
-    PROCESSED.append(word)
-    if word in WORDS:
-        WORDS.remove(word)
-
-
-async def main():
-    """
-    Main function to coordinate tasks.
-    """
-    logger.info("> Starting program...")
-    base_keywords = ["example", "shop", "business"]  # Define base keywords
-    await fetch_com_bd_words(base_keywords)
-
-    while WORDS:
-        tasks = [fetch_files(word) for word in WORDS[:3]]
-        await asyncio.gather(*tasks)
-        await asyncio.sleep(2)
+    async with aiohttp.ClientSession() as session:
+        for keyword in keywords:
+            logger.info(f"Scraping for keyword: {keyword}")
+            for page in range(0, pages_per_keyword * 10, 10):  # Google paginates in steps of 10
+                urls = await fetch_urls(session, keyword, page)
+                if urls:
+                    logger.info(f"Found {len(urls)} URLs on page {page // 10 + 1} for '{keyword}'")
 
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("Program terminated by user.")
-    finally:
-        save_wordlist()
+    # Define your keywords
+    keywords = ["example.com.bd", "shop.com.bd", "teashop.com.bd"]
+
+    # Start the scraping
+    asyncio.run(scrape_com_bd_keywords(keywords))
